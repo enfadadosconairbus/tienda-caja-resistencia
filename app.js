@@ -342,7 +342,7 @@
       html = '<span aria-hidden="true">⚠️</span> <strong>Posible entrega después de la marcha.</strong> Por los plazos de producción, tu camiseta podría llegar <strong>después de la marcha al Ministerio del 12-Septiembre</strong>. Tu aportación sigue sosteniendo la caja de resistencia.';
     } else {
       urgente = false;
-      html = '<span aria-hidden="true">⏱️</span> <strong>Pide antes del lunes 7 de septiembre a las 19:00</strong> para recibir la camiseta antes de la <strong>marcha al Ministerio del 12-Septiembre</strong>. Después de esa hora podría llegarte tras la marcha (producción 4-5 días).';
+      html = '<span aria-hidden="true">⏱️</span> <strong>Pide antes del domingo 6 de septiembre a las 21:00</strong> para recibir la camiseta antes de la <strong>marcha al Ministerio del 12-Septiembre</strong>. Después de esa hora podría llegarte tras la marcha (producción 4-5 días).';
     }
     [$('avisoEntregaPedido'), $('avisoEntregaExito')].forEach(function (el) {
       if (!el) return;

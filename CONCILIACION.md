@@ -91,12 +91,41 @@ Probado en producción con dos conceptos "malos" a propósito — `AIR2600601`
 (sin guion) y `AIR26_00565` (guion bajo) — y **ambos conciliaron** correctamente.
 Los dos pedidos de prueba se revirtieron luego a `CADUCADO`.
 
-## 10. Desplegar un cambio del backend
+## 10. Pedidos tardíos (retenidos de producción)
+
+Desde el **domingo 6-sep 21:00** (fecha límite para llegar a la marcha del 12-S),
+todo pedido nuevo se marca **tardío**. Un tardío **se cobra y se concilia igual**
+que cualquiera —no cambia nada del pago—, pero queda **retenido**: **no entra solo
+al proveedor**. Antes de producirlos hay que **hablar con el proveedor** para ver
+si llegan a tiempo.
+
+Cómo funciona, en la práctica:
+
+- **La marca es una columna nueva en `PEDIDOS`: `TARDIO`.** Valores:
+  `RETENIDO` (rojo, retenido), `LIBERADO` (verde, ya se produce) o vacío (a tiempo).
+  Lo pone el **backend** al crear el pedido, comparando con `CONFIG → AVISO_FECHA_LIMITE`
+  (no decide el navegador). Esa fecha debe **coincidir** con la de `config.js` de la web.
+- **Conciliar** un tardío es normal: pasa a `PAGO_CONCILIADO` y recibe su email. No hay
+  que hacer nada distinto en el proceso diario de la sección 5.
+- **📦 Generar pedido a proveedor** **salta** los `RETENIDO` y te dice cuántos ha
+  dejado fuera. Los pedidos a tiempo se producen; los tardíos esperan.
+- **Cuando el proveedor confirme plazos:** en `PEDIDOS`, **selecciona las filas** de
+  los pedidos tardíos (una o varias) → menú → **🕒 Liberar pedidos tardíos (selección)**.
+  Pasan a `LIBERADO` y entran en el **siguiente** *Generar pedido a proveedor*.
+  Liberar **no** cambia el estado ni envía emails: solo levanta la retención.
+
+## 11. Desplegar un cambio del backend
 
 `conciliarBanco` vive en `Code.gs`. Para cualquier cambio: pega el `Code.gs` →
 *Implementar → Gestionar implementaciones → ✏️ Editar → Nueva versión → Implementar*.
 La conciliación es **manual**, así que tocarla **no afecta** al alta de pedidos.
 Rollback: en *Gestionar implementaciones* vuelve a la versión anterior.
+
+> **Al desplegar la columna `TARDIO` por primera vez:** tras pegar el `Code.gs`,
+> ejecuta una vez el menú **👕 → 🎨 Reconstruir panel y formato**. Añade la cabecera
+> `TARDIO` a `PEDIDOS` y sus colores, sin tocar los datos. (El *setup* no reescribe la
+> cabecera si la hoja ya tiene pedidos; *Reconstruir panel y formato* sí.) Los pedidos
+> anteriores quedan con `TARDIO` vacío = a tiempo, que es lo correcto.
 
 ---
 
@@ -105,3 +134,6 @@ Rollback: en *Gestionar implementaciones* vuelve a la versión anterior.
 `PAGO_CONCILIADO` → **📦 Generar pedido a proveedor** → `ENVIADO_PROVEEDOR` →
 **📥 Marcar lote recibido** (hoja `LOTES`) → `LISTO_RECOGIDA` (+ email) →
 **🤝 Marcar ENTREGADO** (hoja `PEDIDOS`) → `ENTREGADO`.
+
+Los pedidos **`TARDIO = RETENIDO`** se saltan el primer paso hasta liberarlos
+(**🕒 Liberar pedidos tardíos**); ver sección 10.

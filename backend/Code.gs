@@ -37,7 +37,7 @@ var HEAD = {
   PEDIDOS: ['ID', 'FECHA_PEDIDO', 'NOMBRE', 'APELLIDOS', 'EMAIL', 'TELEFONO',
             'UNIDADES', 'PRODUCTOS_EUR', 'APORTACION_EUR', 'TOTAL_EUR', 'ESTADO',
             'CLIENT_REQUEST_ID', 'RECOGIDA', 'CADUCA', 'FECHA_CONFIRMADO',
-            'FECHA_LISTO', 'FECHA_ENTREGADO', 'SITE'],
+            'FECHA_LISTO', 'FECHA_ENTREGADO', 'SITE', 'TARDIO'],
   LINEAS: ['ID', 'FECHA_PEDIDO', 'PRODUCTO', 'SKU', 'TALLA', 'CANTIDAD', 'LOTE'],
   CATALOGO: ['ACTIVO', 'PRODUCTO', 'SKU', 'TALLA', 'MEDIDAS', 'PRECIO', 'COSTE', 'APORTE_CAJA'],
   BANCO: ['FECHA', 'CONCEPTO', 'IMPORTE', 'REFERENCIA', 'PEDIDO_DETECTADO', 'RESULTADO', 'PROCESADO', 'FECHA_CONCILIACION'],
@@ -49,6 +49,16 @@ var HEAD = {
 // Flujo de estados de un pedido.
 var ESTADOS = ['PENDIENTE_PAGO', 'PAGO_CONCILIADO', 'ENVIADO_PROVEEDOR', 'RECIBIDO', 'LISTO_RECOGIDA', 'ENTREGADO', 'CADUCADO'];
 var ESTADOS_PAGADOS = ['PAGO_CONCILIADO', 'ENVIADO_PROVEEDOR', 'RECIBIDO', 'LISTO_RECOGIDA', 'ENTREGADO'];
+
+// Marca "tardío" (columna TARDIO de PEDIDOS). Es INDEPENDIENTE del ESTADO: un pedido
+// tardío se cobra y concilia con normalidad, pero NO entra solo al proveedor. Valores:
+//   RETENIDO = pedido tras la fecha límite; se retiene de producción hasta hablar con el proveedor.
+//   LIBERADO = ya hablado con el proveedor y confirmado que llega a tiempo → sí produce.
+//   ''       = pedido a tiempo, flujo normal.
+// Quien decide RETENIDO es el BACKEND al crear el pedido (CONFIG → AVISO_FECHA_LIMITE),
+// no el navegador. Solo se retiene en 📦 Generar pedido a proveedor (ver más abajo).
+var TARDIO_RETENIDO = 'RETENIDO';
+var TARDIO_LIBERADO = 'LIBERADO';
 
 // Paleta (siguiendo la estela del Excel de referencia, con el naranja de marca).
 var COL = {
@@ -120,16 +130,33 @@ function crearPedido(data) {
     var caduca = new Date(ahora.getTime() + Number(cfg.CADUCIDAD_HORAS || 12) * 3600 * 1000);
     var recogida = limpiar(data.recogida || cfg.RECOGIDA || '', 200);
 
+    // ¿Pedido tardío? Lo decide el servidor con SU fecha límite (CONFIG), nunca el
+    // navegador. Tardío = RETENIDO: se cobra y concilia igual, pero se retiene de
+    // producción hasta que confirmemos plazos con el proveedor.
+    var tardio = esTardio(cfg, ahora) ? TARDIO_RETENIDO : '';
+
     ss.getSheetByName(SH.PEDIDOS).appendRow([id, ahora, nombre, apellidos, email, telefono,
-      unidades, productos, aportacion, total, 'PENDIENTE_PAGO', crid, recogida, caduca, '', '', '', site]);
+      unidades, productos, aportacion, total, 'PENDIENTE_PAGO', crid, recogida, caduca, '', '', '', site, tardio]);
     var hojaLineas = ss.getSheetByName(SH.LINEAS);
     lineas.forEach(function (l) { hojaLineas.appendRow([id, ahora, l.producto, l.sku, l.talla, l.cantidad, '']); });
 
     try { emailPedidoRecibido(email, id, nombre, lineas, productos, aportacion, total, cfg); }
     catch (e) { registrarLog(ss, 'EMAIL_ERROR', 'recibido ' + id + ': ' + e); }
-    registrarLog(ss, 'PEDIDO', id + ' · ' + unidades + ' uds · ' + eur(total));
+    registrarLog(ss, 'PEDIDO', id + ' · ' + unidades + ' uds · ' + eur(total) + (tardio ? ' · TARDÍO (retenido de producción)' : ''));
     return respuestaPedido(id, total, cfg);
   } finally { lock.releaseLock(); }
+}
+
+// ¿Se creó el pedido a partir de la fecha límite? Fuente: CONFIG → AVISO_FECHA_LIMITE
+// (misma fecha que la del aviso de la web, pero aquí manda el servidor). Admite el
+// valor como texto ISO ('2026-09-06T21:00:00+02:00') o como Date si Sheets lo parseó.
+// Sin fecha válida en CONFIG, ningún pedido se marca tardío (comportamiento seguro).
+function esTardio(cfg, ahora) {
+  var raw = cfg && cfg.AVISO_FECHA_LIMITE;
+  if (!raw) return false;
+  var limite = (raw instanceof Date) ? raw : new Date(String(raw));
+  if (isNaN(limite.getTime())) return false;
+  return (ahora || new Date()) >= limite;
 }
 function respuestaPedido(id, total, cfg) {
   return { ok: true, order_id: id, total: Number(total), beneficiario: cfg.BENEFICIARIO || '', iban: cfg.IBAN || '', concepto: id };
@@ -202,20 +229,26 @@ function generarPedidoProveedor() {
   // UN LOTE POR SITE: agrupamos los pedidos PAGO_CONCILIADO por su site, para que
   // el proveedor pueda producir y separar en cajas distintas por site.
   var ORDEN = ['albacete','cádiz','cadiz','getafe','illescas','san pablo','tablada'];
-  var porSite = {};
+  var porSite = {}, retenidos = 0;
   for (var id in pedidos) {
     if (pedidos[id].estado !== 'PAGO_CONCILIADO') continue;
+    // Pedidos tardíos RETENIDOS: se saltan (no entran solos a producción). Se
+    // incluyen cuando se liberan a mano (🕒 Liberar pedidos tardíos), tras hablar
+    // con el proveedor. LIBERADO y '' sí entran.
+    if (pedidos[id].tardio === TARDIO_RETENIDO) { retenidos++; continue; }
     var nombre = String(pedidos[id].site || '').trim() || 'Sin site';
     var k = nombre.toLowerCase();
     if (!porSite[k]) porSite[k] = { nombre: nombre, ids: [] };
     porSite[k].ids.push(id);
   }
+  var notaReten = retenidos ? ('\n\n🕒 ' + retenidos + ' pedido(s) TARDÍOS retenidos, NO incluidos en producción. ' +
+    'Confirma plazos con el proveedor y libéralos con "🕒 Liberar pedidos tardíos (selección)".') : '';
   var claves = Object.keys(porSite).sort(function (a, b) {
     var ia = ORDEN.indexOf(a), ib = ORDEN.indexOf(b);
     if (ia < 0) ia = 99; if (ib < 0) ib = 99;
     return (ia - ib) || a.localeCompare(b);
   });
-  if (!claves.length) { ui().alert('No hay pedidos listos para producir.'); return; }
+  if (!claves.length) { ui().alert('No hay pedidos listos para producir.' + notaReten); return; }
 
   var shL = ss.getSheetByName(SH.LINEAS), H = HEAD.LINEAS, lastL = shL.getLastRow();
   var lin = (lastL >= 2) ? shL.getRange(2, 1, lastL - 1, H.length).getValues() : [];
@@ -251,11 +284,11 @@ function generarPedidoProveedor() {
     registrarLog(ss, 'LOTE', lote + ' · ' + grupo.nombre + ' · ' + keys.length + ' líneas · ' + uds + ' uds');
   });
 
-  if (!nLotes) { ui().alert('Los pedidos pagados ya estaban loteados.'); return; }
+  if (!nLotes) { ui().alert('Los pedidos pagados ya estaban loteados.' + notaReten); return; }
   regenerarResumenProveedor(ss);
   refrescarDashboard();
   ui().alert('Generados ' + nLotes + ' lote(s) — uno por site — · ' + udsTotal + ' uds en total:\n\n' + resumen.join('\n') +
-    '\n\nDetalle en la hoja PROVEEDOR (ordénala por LOTE) y totales por talla × site en RESUMEN_PROVEEDOR. Las dos se exportan con 📗 Exportar a Excel.');
+    '\n\nDetalle en la hoja PROVEEDOR (ordénala por LOTE) y totales por talla × site en RESUMEN_PROVEEDOR. Las dos se exportan con 📗 Exportar a Excel.' + notaReten);
 }
 
 // Ítem de menú: reconstruye RESUMEN_PROVEEDOR sin generar lotes nuevos (útil tras
@@ -667,6 +700,47 @@ function marcarEntregadoSeleccion() {
   registrarLog(ss, 'ENTREGA', r.id); refrescarDashboard();
   ui().alert('Pedido ' + r.id + ' → ENTREGADO.');
 }
+
+// Libera pedidos TARDÍOS retenidos: RETENIDO → LIBERADO, para que entren al proveedor
+// en la próxima "📦 Generar pedido a proveedor". Úsalo SOLO tras confirmar con el
+// proveedor que llegan a tiempo. Trabaja sobre la SELECCIÓN (una o varias filas) de
+// la hoja PEDIDOS, así que puedes marcar varios pedidos a la vez. No toca el ESTADO
+// ni envía emails: solo levanta la retención.
+function liberarPedidosTardiosSeleccion() {
+  var ss = SpreadsheetApp.getActive(), sh = ss.getActiveSheet();
+  if (sh.getName() !== SH.PEDIDOS) { ui().alert('Ponte en la hoja PEDIDOS y selecciona la(s) fila(s) de los pedidos tardíos a liberar.'); return; }
+  var H = HEAD.PEDIDOS, colT = H.indexOf('TARDIO') + 1, colId = H.indexOf('ID') + 1;
+  var rango = sh.getActiveRange();
+  var fila0 = rango.getRow(), n = rango.getNumRows();
+  if (fila0 < 2) { fila0 = 2; n = Math.max(0, sh.getLastRow() - 1); }   // si tocó la cabecera, toma todo
+  if (n <= 0) { ui().alert('Selecciona al menos una fila de pedido.'); return; }
+
+  var liberados = [], yaLib = 0, noTardios = 0;
+  for (var i = 0; i < n; i++) {
+    var f = fila0 + i;
+    if (f > sh.getLastRow()) break;
+    var val = String(sh.getRange(f, colT).getValue() || '').trim().toUpperCase();
+    if (val === TARDIO_RETENIDO) {
+      sh.getRange(f, colT).setValue(TARDIO_LIBERADO);
+      liberados.push(String(sh.getRange(f, colId).getValue() || ''));
+    } else if (val === TARDIO_LIBERADO) yaLib++;
+    else noTardios++;
+  }
+
+  if (!liberados.length) {
+    ui().alert('No he liberado nada.\n\n' +
+      (yaLib ? yaLib + ' pedido(s) ya estaban LIBERADOS.\n' : '') +
+      (noTardios ? noTardios + ' fila(s) no eran pedidos tardíos (RETENIDO).\n' : '') +
+      '\nSelecciona en PEDIDOS las filas con TARDIO = RETENIDO.');
+    return;
+  }
+  registrarLog(ss, 'TARDIO_LIBERADO', liberados.length + ' liberados: ' + liberados.join(', '));
+  refrescarDashboard();
+  ui().alert('✅ Liberados ' + liberados.length + ' pedido(s) tardío(s):\n\n' + liberados.join('\n') +
+    '\n\nEntrarán a producción en la próxima "📦 Generar pedido a proveedor".' +
+    (yaLib ? '\n\n(' + yaLib + ' ya estaban liberados.)' : '') +
+    (noTardios ? '\n(' + noTardios + ' fila(s) no eran tardías.)' : ''));
+}
 function caducarPendientes() {
   var ss = SpreadsheetApp.getActive(), sh = ss.getSheetByName(SH.PEDIDOS), H = HEAD.PEDIDOS, last = sh.getLastRow();
   if (last < 2) return;
@@ -983,7 +1057,7 @@ function filaAObjeto(row, fila) {
   var H = HEAD.PEDIDOS, g = function (k) { return row[H.indexOf(k)]; };
   return { fila: fila, id: String(g('ID')), nombre: g('NOMBRE'), email: g('EMAIL'), unidades: Number(g('UNIDADES')) || 0,
     productos: Number(g('PRODUCTOS_EUR')) || 0, aportacion: Number(g('APORTACION_EUR')) || 0, total: Number(g('TOTAL_EUR')) || 0,
-    estado: String(g('ESTADO')), site: String(g('SITE') || '') };
+    estado: String(g('ESTADO')), site: String(g('SITE') || ''), tardio: String(g('TARDIO') || '').trim().toUpperCase() };
 }
 function buscarPorCRID(ss, crid) {
   var sh = ss.getSheetByName(SH.PEDIDOS), H = HEAD.PEDIDOS, last = sh.getLastRow(); if (last < 2) return null;
@@ -1171,7 +1245,7 @@ function setupTiendaV4() {
   hoja(ss, SH.LOG, HEAD.LOG);
 
   var cfg = ss.getSheetByName(SH.CONFIG);
-  if (cfg.getLastRow() < 2) cfg.getRange(2, 1, 18, 2).setValues([
+  if (cfg.getLastRow() < 2) cfg.getRange(2, 1, 19, 2).setValues([
     ['BENEFICIARIO', 'Caja de Resistencia Huelga Airbus 2026 - Sindicato Útil'],
     ['IBAN', 'ESXX XXXX XXXX XXXX XXXX XXXX  [COMPLETAR ANTES DE PUBLICAR]'],
     ['EMAIL_CONTACTO', 'enfadadosconairbus.contacto@gmail.com'],
@@ -1181,6 +1255,11 @@ function setupTiendaV4() {
     ['EMAIL_REMITENTE', 'enfadadosconairbus.contacto@gmail.com'],
     ['EMAIL_REMITENTE_NOMBRE', 'Caja de Resistencia · Huelga Airbus'],
     ['PROD_TODOS_SITES_DESDE', '2026-09-10'],
+    // Fecha límite para producir a tiempo. Los pedidos creados a partir de este
+    // instante se marcan TARDIO=RETENIDO y NO entran solos al proveedor (hay que
+    // liberarlos a mano tras confirmar plazos). Debe ir en ISO con zona horaria y
+    // coincidir con AVISO_FECHA_LIMITE de config.js (web).
+    ['AVISO_FECHA_LIMITE', '2026-09-06T21:00:00+02:00'],
     // Direcciones de envío por site (el proveedor envía). RESUMEN_PROVEEDOR las replica.
     ['ENVIO_GETAFE', '[COMPLETAR dirección de envío · Getafe]'],
     ['ENVIO_ILLESCAS', '[COMPLETAR dirección de envío · Illescas]'],
@@ -1249,6 +1328,10 @@ function formatoCondicionalEstados(ss) {
   pares.forEach(function (p) {
     reglas.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(p[0]).setBackground(p[1]).setRanges([rango]).build());
   });
+  // Columna TARDIO: RETENIDO en rojo (retenido de producción), LIBERADO en verde.
+  var colT = HEAD.PEDIDOS.indexOf('TARDIO') + 1, rangoT = sh.getRange(2, colT, 5000, 1);
+  reglas.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('RETENIDO').setBackground(COL.tRed).setRanges([rangoT]).build());
+  reglas.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('LIBERADO').setBackground(COL.tGreen).setRanges([rangoT]).build());
   sh.setConditionalFormatRules(reglas);
 
   // Banco: REVISAR en rojo, conciliado en verde.
@@ -1278,7 +1361,8 @@ function construirHowTo(ss) {
     ['🏦 IMPORTAR BANCO', 'Pega el extracto (FECHA · CONCEPTO · IMPORTE · REFERENCIA) en la hoja MOVIMIENTOS_BANCO.'],
     ['🔄 CONCILIAR', 'Menú 👕 → 🏦 Conciliar banco. Los matches exactos (código + importe) pasan a PAGO_CONCILIADO y reciben email.'],
     ['⚠️ REVISAR', 'Filtra RESULTADO = REVISAR. No fuerces matches dudosos por nombre; usa "Confirmar PAGO (manual)" solo si lo verificas.'],
-    ['📦 CERRAR LOTE', 'Menú 👕 → 📦 Generar pedido a proveedor. Solo entran PAGO_CONCILIADO sin lote. Agrega por PRODUCTO+SKU+TALLA.'],
+    ['📦 CERRAR LOTE', 'Menú 👕 → 📦 Generar pedido a proveedor. Solo entran PAGO_CONCILIADO sin lote. Agrega por PRODUCTO+SKU+TALLA. Los pedidos TARDÍOS (columna TARDIO = RETENIDO) NO entran solos: quedan fuera hasta liberarlos.'],
+    ['🕒 TARDÍOS', 'Pedidos hechos tras la fecha límite (CONFIG → AVISO_FECHA_LIMITE). Se cobran y concilian igual, pero se RETIENEN de producción. Confirma plazos con el proveedor → selecciona sus filas en PEDIDOS → 🕒 Liberar pedidos tardíos. Pasan a LIBERADO y ya entran al siguiente lote.'],
     ['📤 ENVIAR PROVEEDOR', 'Usa la hoja PROVEEDOR (resumen limpio por talla del lote). Exporta a Excel si lo necesitas.'],
     ['📥 RECIBIR', 'Cuando llegue la mercancía: hoja LOTES → selecciona el lote → 📥 Marcar lote recibido. Los pedidos completos pasan a LISTO_RECOGIDA y avisan por email.'],
     ['🤝 ENTREGAR', 'Al entregar en mano: hoja PEDIDOS → selecciona la fila → 🤝 Marcar ENTREGADO.']
@@ -1347,7 +1431,7 @@ function construirDashboard(ss) {
 
   // Leyenda
   sh.getRange('A31').setValue('LECTURA RÁPIDA').setFontWeight('bold').setFontColor(COL.orange);
-  sh.getRange('A32:I32').merge().setValue('🟠 PENDIENTE_PAGO: creado, sin pago.   🟢 PAGO_CONCILIADO: puede entrar al lote.   🔵 ENVIADO_PROVEEDOR: bloqueado para nuevos lotes.   🟡 LISTO_RECOGIDA: avisado.   ⚪ ENTREGADO.   ⚠️ REVISAR: intervención humana.')
+  sh.getRange('A32:I32').merge().setValue('🟠 PENDIENTE_PAGO: creado, sin pago.   🟢 PAGO_CONCILIADO: puede entrar al lote.   🔵 ENVIADO_PROVEEDOR: bloqueado para nuevos lotes.   🟡 LISTO_RECOGIDA: avisado.   ⚪ ENTREGADO.   ⚠️ REVISAR: intervención humana.   🕒 TARDIO=RETENIDO: pagado pero retenido de producción hasta liberarlo (habla con el proveedor).')
     .setWrap(true).setVerticalAlignment('middle').setFontColor(COL.slate);
   sh.setRowHeight(32, 40);
 }
@@ -1414,6 +1498,7 @@ function onOpen() {
     .addItem('⏳ Caducar pendientes vencidos', 'caducarPendientes')
     .addSeparator()
     .addItem('📦 Generar pedido a proveedor', 'generarPedidoProveedor')
+    .addItem('🕒 Liberar pedidos tardíos (selección)', 'liberarPedidosTardiosSeleccion')
     .addItem('🧾 Refrescar RESUMEN_PROVEEDOR', 'refrescarResumenProveedor')
     .addItem('🔧 Reconstruir PROVEEDOR desde LINEAS', 'reconstruirProveedorDesdeLineas')
     .addItem('📥 Marcar lote recibido (seleccionado)', 'marcarLoteRecibidoSeleccion')

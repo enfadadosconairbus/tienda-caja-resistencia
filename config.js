@@ -27,8 +27,11 @@ window.TIENDA_CONFIG = {
   APORTACIONES_ACTIVAS: true,
 
   // Avisos de entrega ("puede llegar después de la marcha del 12-S"):
-  // 1) por fecha: pedidos a partir de este instante (Sept 7, 19:00 hora peninsular).
-  AVISO_FECHA_LIMITE: '2026-09-07T19:00:00+02:00',
+  // 1) por fecha: pedidos a partir de este instante (domingo 6-sep, 21:00 hora peninsular).
+  //    OJO: este valor es solo para el AVISO de la web. Quien decide de verdad si un
+  //    pedido es "tardío" (y lo RETIENE de producción) es el backend, con su propia
+  //    copia en CONFIG → AVISO_FECHA_LIMITE. Mantén las dos fechas iguales.
+  AVISO_FECHA_LIMITE: '2026-09-06T21:00:00+02:00',
   // 2) por stock: cuando se alcanzan estas camisetas pedidas (solo si las aportaciones están activas).
   AVISO_STOCK_UMBRAL: 2500,
 
